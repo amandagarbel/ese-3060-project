@@ -1,19 +1,7 @@
-# Taken from https://github.com/KellerJordan/cifar10-airbench/blob/master/legacy/airbench94.py
-# Uncompiled variant of airbench94_compiled.py
-# 3.83s runtime on an A100; 0.36 PFLOPs.
-# Evidence: 94.01 average accuracy in n=1000 runs.
-#
-# We recorded the runtime of 3.83 seconds on an NVIDIA A100-SXM4-80GB with the following nvidia-smi:
-# NVIDIA-SMI 515.105.01   Driver Version: 515.105.01   CUDA Version: 11.7
-# torch.__version__ == '2.1.2+cu118'
-
-#############################################
-#            Setup/Hyperparameters          #
-#############################################
-
 import os
 import sys
 import uuid
+import argparse
 from math import ceil
 
 import torch
@@ -24,44 +12,106 @@ import torchvision.transforms as T
 
 torch.backends.cudnn.benchmark = True
 
-# We express the main training hyperparameters (batch size, learning rate, momentum, and weight decay)
-# in decoupled form, so that each one can be tuned independently. This accomplishes the following:
-# * Assuming time-constant gradients, the average step size is decoupled from everything but the lr.
-# * The size of the weight decay update is decoupled from everything but the wd.
-# In constrast, normally when we increase the (Nesterov) momentum, this also scales up the step size
-# proportionally to 1 + 1 / (1 - momentum), meaning we cannot change momentum without having to re-tune
-# the learning rate. Similarly, normally when we increase the learning rate this also increases the size
-# of the weight decay, requiring a proportional decrease in the wd to maintain the same decay strength.
-#
-# The practical impact is that hyperparameter tuning is faster, since this parametrization allows each
-# one to be tuned independently. See https://myrtle.ai/learn/how-to-train-your-resnet-5-hyperparameters/.
+#############################################
+#         Argument Parser Setup            #
+#############################################
 
-hyp = {
-    'opt': {
-        'train_epochs': 9.9,
-        'batch_size': 1024,
-        'lr': 11.5,                 # learning rate per 1024 examples
-        'momentum': 0.85,
-        'weight_decay': 0.0153,     # weight decay per 1024 examples (decoupled from learning rate)
-        'bias_scaler': 64.0,        # scales up learning rate (but not weight decay) for BatchNorm biases
-        'label_smoothing': 0.2,
-        'whiten_bias_epochs': 3,    # how many epochs to train the whitening layer bias before freezing
-    },
-    'aug': {
-        'flip': True,
-        'translate': 2,
-    },
-    'net': {
-        'widths': {
-            'block1': 64,
-            'block2': 256,
-            'block3': 256,
+def parse_args():
+    parser = argparse.ArgumentParser(description='CIFAR-10 Training Speedrun')
+    
+    # Training hyperparameters
+    parser.add_argument('--train-epochs', type=float, default=9.9,
+                        help='Number of training epochs')
+    parser.add_argument('--batch-size', type=int, default=1024,
+                        help='Batch size for training')
+    parser.add_argument('--lr', type=float, default=11.5,
+                        help='Learning rate per 1024 examples')
+    parser.add_argument('--momentum', type=float, default=0.85,
+                        help='SGD momentum')
+    parser.add_argument('--weight-decay', type=float, default=0.0153,
+                        help='Weight decay per 1024 examples')
+    parser.add_argument('--bias-scaler', type=float, default=64.0,
+                        help='Learning rate scaler for BatchNorm biases')
+    parser.add_argument('--label-smoothing', type=float, default=0.2,
+                        help='Label smoothing factor')
+    parser.add_argument('--whiten-bias-epochs', type=int, default=3,
+                        help='Epochs to train whitening layer bias')
+    
+    # Augmentation settings
+    parser.add_argument('--flip', action='store_true', default=True,
+                        help='Use horizontal flip augmentation')
+    parser.add_argument('--no-flip', dest='flip', action='store_false',
+                        help='Disable horizontal flip augmentation')
+    parser.add_argument('--translate', type=int, default=2,
+                        help='Translation augmentation amount (pixels)')
+    parser.add_argument('--derandomized-translate', action='store_true', default=False,
+                        help='Use derandomized translation pattern')
+    
+    # Network architecture
+    parser.add_argument('--block1-width', type=int, default=64,
+                        help='Width of first conv block')
+    parser.add_argument('--block2-width', type=int, default=256,
+                        help='Width of second conv block')
+    parser.add_argument('--block3-width', type=int, default=256,
+                        help='Width of third conv block')
+    parser.add_argument('--bn-momentum', type=float, default=0.6,
+                        help='BatchNorm momentum')
+    parser.add_argument('--scaling-factor', type=float, default=1/9,
+                        help='Output scaling factor')
+    parser.add_argument('--tta-level', type=int, default=2,
+                        help='Test-time augmentation level (0-2)')
+    parser.add_argument('--per-layer-bn-bias', action='store_true', default=False,
+                        help='Enable per-layer BN bias training')
+    
+    # Experiment settings
+    parser.add_argument('--num-runs', type=int, default=25,
+                        help='Number of runs for statistical analysis')
+    parser.add_argument('--seed', type=int, default=None,
+                        help='Random seed (if None, uses random seeds)')
+    parser.add_argument('--log-dir', type=str, default='logs',
+                        help='Directory to save logs')
+    parser.add_argument('--experiment-name', type=str, default=None,
+                        help='Name for this experiment')
+    parser.add_argument('--no-warmup', action='store_true', default=False,
+                        help='Skip warmup run')
+    
+    return parser.parse_args()
+
+#############################################
+#            Setup/Hyperparameters          #
+#############################################
+
+def setup_hyperparameters(args):
+    """Convert argparse arguments to hyperparameter dictionary"""
+    hyp = {
+        'opt': {
+            'train_epochs': args.train_epochs,
+            'batch_size': args.batch_size,
+            'lr': args.lr,
+            'momentum': args.momentum,
+            'weight_decay': args.weight_decay,
+            'bias_scaler': args.bias_scaler,
+            'label_smoothing': args.label_smoothing,
+            'whiten_bias_epochs': args.whiten_bias_epochs,
         },
-        'batchnorm_momentum': 0.6,
-        'scaling_factor': 1/9,
-        'tta_level': 2,         # the level of test-time augmentation: 0=none, 1=mirror, 2=mirror+translate
-    },
-}
+        'aug': {
+            'flip': args.flip,
+            'translate': args.translate,
+            'derandomized_translate': args.derandomized_translate,
+        },
+        'net': {
+            'widths': {
+                'block1': args.block1_width,
+                'block2': args.block2_width,
+                'block3': args.block3_width,
+            },
+            'batchnorm_momentum': args.bn_momentum,
+            'scaling_factor': args.scaling_factor,
+            'tta_level': args.tta_level,
+            'per_layer_bn_bias': args.per_layer_bn_bias,
+        },
+    }
+    return hyp
 
 #############################################
 #                DataLoader                 #
@@ -74,11 +124,18 @@ def batch_flip_lr(inputs):
     flip_mask = (torch.rand(len(inputs), device=inputs.device) < 0.5).view(-1, 1, 1, 1)
     return torch.where(flip_mask, inputs.flip(-1), inputs)
 
-def batch_crop(images, crop_size):
+def batch_crop(images, crop_size, derandomized=False):
     r = (images.size(-1) - crop_size)//2
-    shifts = torch.randint(-r, r+1, size=(len(images), 2), device=images.device)
+    if derandomized:
+        # Use fixed pattern instead of random
+        shifts = torch.zeros(len(images), 2, dtype=torch.long, device=images.device)
+        pattern = torch.tensor([[-r, -r], [0, 0], [r, r], [-r, r]], device=images.device)
+        for i in range(len(images)):
+            shifts[i] = pattern[i % len(pattern)]
+    else:
+        shifts = torch.randint(-r, r+1, size=(len(images), 2), device=images.device)
+    
     images_out = torch.empty((len(images), 3, crop_size, crop_size), device=images.device, dtype=images.dtype)
-    # The two cropping methods in this if-else produce equivalent results, but the second is faster for r > 2.
     if r <= 2:
         for sy in range(-r, r+1):
             for sx in range(-r, r+1):
@@ -95,7 +152,6 @@ def batch_crop(images, crop_size):
     return images_out
 
 class CifarLoader:
-
     def __init__(self, path, train=True, batch_size=500, aug=None, drop_last=None, shuffle=None, gpu=0):
         data_path = os.path.join(path, 'train.pt' if train else 'test.pt')
         if not os.path.exists(data_path):
@@ -106,16 +162,15 @@ class CifarLoader:
 
         data = torch.load(data_path, map_location=torch.device(gpu))
         self.images, self.labels, self.classes = data['images'], data['labels'], data['classes']
-        # It's faster to load+process uint8 data than to load preprocessed fp16 data
         self.images = (self.images.half() / 255).permute(0, 3, 1, 2).to(memory_format=torch.channels_last)
 
         self.normalize = T.Normalize(CIFAR_MEAN, CIFAR_STD)
-        self.proc_images = {} # Saved results of image processing to be done on the first epoch
+        self.proc_images = {}
         self.epoch = 0
 
         self.aug = aug or {}
         for k in self.aug.keys():
-            assert k in ['flip', 'translate'], 'Unrecognized key: %s' % k
+            assert k in ['flip', 'translate', 'derandomized_translate'], 'Unrecognized key: %s' % k
 
         self.batch_size = batch_size
         self.drop_last = train if drop_last is None else drop_last
@@ -125,24 +180,22 @@ class CifarLoader:
         return len(self.images)//self.batch_size if self.drop_last else ceil(len(self.images)/self.batch_size)
 
     def __iter__(self):
-
         if self.epoch == 0:
             images = self.proc_images['norm'] = self.normalize(self.images)
-            # Pre-flip images in order to do every-other epoch flipping scheme
             if self.aug.get('flip', False):
                 images = self.proc_images['flip'] = batch_flip_lr(images)
-            # Pre-pad images to save time when doing random translation
             pad = self.aug.get('translate', 0)
             if pad > 0:
                 self.proc_images['pad'] = F.pad(images, (pad,)*4, 'reflect')
 
         if self.aug.get('translate', 0) > 0:
-            images = batch_crop(self.proc_images['pad'], self.images.shape[-2])
+            derandomized = self.aug.get('derandomized_translate', False)
+            images = batch_crop(self.proc_images['pad'], self.images.shape[-2], derandomized)
         elif self.aug.get('flip', False):
             images = self.proc_images['flip']
         else:
             images = self.proc_images['norm']
-        # Flip all images together every other epoch. This increases diversity relative to random flipping
+        
         if self.aug.get('flip', False):
             if self.epoch % 2 == 1:
                 images = images.flip(-1)
@@ -170,12 +223,10 @@ class Mul(nn.Module):
         return x * self.scale
 
 class BatchNorm(nn.BatchNorm2d):
-    def __init__(self, num_features, momentum, eps=1e-12,
-                 weight=False, bias=True):
+    def __init__(self, num_features, momentum, eps=1e-12, weight=False, bias=True):
         super().__init__(num_features, eps=eps, momentum=1-momentum)
         self.weight.requires_grad = weight
         self.bias.requires_grad = bias
-        # Note that PyTorch already initializes the weights to one and bias to zero
 
 class Conv(nn.Conv2d):
     def __init__(self, in_channels, out_channels, kernel_size=3, padding='same', bias=False):
@@ -191,7 +242,7 @@ class Conv(nn.Conv2d):
 class ConvGroup(nn.Module):
     def __init__(self, channels_in, channels_out, batchnorm_momentum):
         super().__init__()
-        self.conv1 = Conv(channels_in,  channels_out)
+        self.conv1 = Conv(channels_in, channels_out)
         self.pool = nn.MaxPool2d(2)
         self.norm1 = BatchNorm(channels_out, batchnorm_momentum)
         self.conv2 = Conv(channels_out, channels_out)
@@ -212,7 +263,7 @@ class ConvGroup(nn.Module):
 #            Network Definition             #
 #############################################
 
-def make_net():
+def make_net(hyp):
     widths = hyp['net']['widths']
     batchnorm_momentum = hyp['net']['batchnorm_momentum']
     whiten_kernel_size = 2
@@ -220,7 +271,7 @@ def make_net():
     net = nn.Sequential(
         Conv(3, whiten_width, whiten_kernel_size, padding=0, bias=True),
         nn.GELU(),
-        ConvGroup(whiten_width,     widths['block1'], batchnorm_momentum),
+        ConvGroup(whiten_width, widths['block1'], batchnorm_momentum),
         ConvGroup(widths['block1'], widths['block2'], batchnorm_momentum),
         ConvGroup(widths['block2'], widths['block3'], batchnorm_momentum),
         nn.MaxPool2d(3),
@@ -287,6 +338,7 @@ def print_columns(columns_list, is_head=False, is_final_entry=False):
         print('-'*len(print_string))
 
 logging_columns_list = ['run   ', 'epoch', 'train_loss', 'train_acc', 'val_acc', 'tta_val_acc', 'total_time_seconds']
+
 def print_training_details(variables, is_final_entry):
     formatted = []
     for col in logging_columns_list:
@@ -306,15 +358,6 @@ def print_training_details(variables, is_final_entry):
 ############################################
 
 def infer(model, loader, tta_level=0):
-
-    # Test-time augmentation strategy (for tta_level=2):
-    # 1. Flip/mirror the image left-to-right (50% of the time).
-    # 2. Translate the image by one pixel either up-and-left or down-and-right (50% of the time,
-    #    i.e. both happen 25% of the time).
-    #
-    # This creates 6 views per image (left/right times the two translations and no-translation),
-    # which we evaluate and then weight according to the given probabilities.
-
     def infer_basic(inputs, net):
         return net(inputs).clone()
 
@@ -348,17 +391,16 @@ def evaluate(model, loader, tta_level=0):
 #                Training                  #
 ############################################
 
-def main(run):
+def main(run, hyp, seed=None):
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
 
     batch_size = hyp['opt']['batch_size']
     epochs = hyp['opt']['train_epochs']
     momentum = hyp['opt']['momentum']
-    # Assuming gradients are constant in time, for Nesterov momentum, the below ratio is how much
-    # larger the default steps will be than the underlying per-example gradients. We divide the
-    # learning rate by this ratio in order to ensure steps are the same scale as gradients, regardless
-    # of the choice of momentum.
     kilostep_scale = 1024 * (1 + 1 / (1 - momentum))
-    lr = hyp['opt']['lr'] / kilostep_scale # un-decoupled learning rate for PyTorch SGD
+    lr = hyp['opt']['lr'] / kilostep_scale
     wd = hyp['opt']['weight_decay'] * batch_size / kilostep_scale
     lr_biases = lr * hyp['opt']['bias_scaler']
 
@@ -366,11 +408,10 @@ def main(run):
     test_loader = CifarLoader('cifar10', train=False, batch_size=2000)
     train_loader = CifarLoader('cifar10', train=True, batch_size=batch_size, aug=hyp['aug'])
     if run == 'warmup':
-        # The only purpose of the first run is to warmup, so we can use dummy data
         train_loader.labels = torch.randint(0, 10, size=(len(train_loader.labels),), device=train_loader.labels.device)
     total_train_steps = ceil(len(train_loader) * epochs)
 
-    model = make_net()
+    model = make_net(hyp)
     current_steps = 0
 
     norm_biases = [p for k, p in model.named_parameters() if 'norm' in k and p.requires_grad]
@@ -393,12 +434,10 @@ def main(run):
     alpha_schedule = 0.95**5 * (torch.arange(total_train_steps+1) / total_train_steps)**3
     lookahead_state = LookaheadState(model)
 
-    # For accurately timing GPU code
     starter = torch.cuda.Event(enable_timing=True)
     ender = torch.cuda.Event(enable_timing=True)
     total_time_seconds = 0.0
 
-    # Initialize the whitening layer using training images
     starter.record()
     train_images = train_loader.normalize(train_loader.images[:5000])
     init_whitening_conv(model[0], train_images)
@@ -407,18 +446,17 @@ def main(run):
     total_time_seconds += 1e-3 * starter.elapsed_time(ender)
 
     for epoch in range(ceil(epochs)):
-
-        model[0].bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
-
-        ####################
-        #     Training     #
-        ####################
+        if hyp['net']['per_layer_bn_bias']:
+            # Enable per-layer control of BN bias training
+            for i, mod in enumerate(model.modules()):
+                if isinstance(mod, BatchNorm):
+                    mod.bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
+        else:
+            model[0].bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
 
         starter.record()
-
         model.train()
         for inputs, labels in train_loader:
-
             outputs = model(inputs)
             loss = loss_fn(outputs, labels).sum()
             optimizer.zero_grad(set_to_none=True)
@@ -440,20 +478,11 @@ def main(run):
         torch.cuda.synchronize()
         total_time_seconds += 1e-3 * starter.elapsed_time(ender)
 
-        ####################
-        #    Evaluation    #
-        ####################
-
-        # Save the accuracy and loss from the last training batch of the epoch
         train_acc = (outputs.detach().argmax(1) == labels).float().mean().item()
         train_loss = loss.item() / batch_size
         val_acc = evaluate(model, test_loader, tta_level=0)
         print_training_details(locals(), is_final_entry=False)
-        run = None # Only print the run number once
-
-    ####################
-    #  TTA Evaluation  #
-    ####################
+        run = None
 
     starter.record()
     tta_val_acc = evaluate(model, test_loader, tta_level=hyp['net']['tta_level'])
@@ -467,18 +496,41 @@ def main(run):
     return tta_val_acc
 
 if __name__ == "__main__":
+    args = parse_args()
+    hyp = setup_hyperparameters(args)
+    
     with open(sys.argv[0]) as f:
         code = f.read()
 
+    print("="*80)
+    print("Experiment Configuration:")
+    print(f"  Name: {args.experiment_name or 'unnamed'}")
+    print(f"  Runs: {args.num_runs}")
+    print(f"  Derandomized translate: {args.derandomized_translate}")
+    print(f"  Per-layer BN bias: {args.per_layer_bn_bias}")
+    print("="*80)
+
     print_columns(logging_columns_list, is_head=True)
-    #main('warmup')
-    accs = torch.tensor([main(run) for run in range(25)])
+    
+    if not args.no_warmup:
+        main('warmup', hyp)
+    
+    accs = torch.tensor([main(run, hyp, seed=args.seed) for run in range(args.num_runs)])
     print('Mean: %.4f    Std: %.4f' % (accs.mean(), accs.std()))
 
-    log = {'code': code, 'accs': accs}
-    log_dir = os.path.join('logs', str(uuid.uuid4()))
+    log = {
+        'code': code,
+        'accs': accs,
+        'args': vars(args),
+        'hyp': hyp,
+    }
+    
+    if args.experiment_name:
+        log_dir = os.path.join(args.log_dir, args.experiment_name)
+    else:
+        log_dir = os.path.join(args.log_dir, str(uuid.uuid4()))
+    
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, 'log.pt')
     print(os.path.abspath(log_path))
-    torch.save(log, os.path.join(log_dir, 'log.pt'))
-
+    torch.save(log, log_path)
