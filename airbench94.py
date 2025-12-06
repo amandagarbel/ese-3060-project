@@ -45,7 +45,7 @@ def parse_args():
     parser.add_argument('--translate', type=int, default=2,
                         help='Translation augmentation amount (pixels)')
     parser.add_argument('--derandomized-translate', action='store_true', default=False,
-                        help='Use derandomized translation pattern')
+                        help='Use derandomized translation pattern (FASTER cropping)')
     
     # Network architecture
     parser.add_argument('--block1-width', type=int, default=64,
@@ -61,7 +61,13 @@ def parse_args():
     parser.add_argument('--tta-level', type=int, default=2,
                         help='Test-time augmentation level (0-2)')
     parser.add_argument('--per-layer-bn-bias', action='store_true', default=False,
-                        help='Enable per-layer BN bias training')
+                        help='Enable per-layer BN bias learning rates')
+    parser.add_argument('--bn-bias-scale-block1', type=float, default=64.0,
+                        help='BN bias LR scale for block 1')
+    parser.add_argument('--bn-bias-scale-block2', type=float, default=32.0,
+                        help='BN bias LR scale for block 2')
+    parser.add_argument('--bn-bias-scale-block3', type=float, default=16.0,
+                        help='BN bias LR scale for block 3')
     
     # Experiment settings
     parser.add_argument('--num-runs', type=int, default=25,
@@ -109,6 +115,11 @@ def setup_hyperparameters(args):
             'scaling_factor': args.scaling_factor,
             'tta_level': args.tta_level,
             'per_layer_bn_bias': args.per_layer_bn_bias,
+            'bn_bias_scales': {
+                'block1': args.bn_bias_scale_block1,
+                'block2': args.bn_bias_scale_block2,
+                'block3': args.bn_bias_scale_block3,
+            }
         },
     }
     return hyp
@@ -124,18 +135,12 @@ def batch_flip_lr(inputs):
     flip_mask = (torch.rand(len(inputs), device=inputs.device) < 0.5).view(-1, 1, 1, 1)
     return torch.where(flip_mask, inputs.flip(-1), inputs)
 
-def batch_crop(images, crop_size, derandomized=False):
+def batch_crop(images, crop_size):
+    """Standard random crop - used by original paper"""
     r = (images.size(-1) - crop_size)//2
-    if derandomized:
-        # Use fixed pattern instead of random
-        shifts = torch.zeros(len(images), 2, dtype=torch.long, device=images.device)
-        pattern = torch.tensor([[-r, -r], [0, 0], [r, r], [-r, r]], device=images.device)
-        for i in range(len(images)):
-            shifts[i] = pattern[i % len(pattern)]
-    else:
-        shifts = torch.randint(-r, r+1, size=(len(images), 2), device=images.device)
-    
+    shifts = torch.randint(-r, r+1, size=(len(images), 2), device=images.device)
     images_out = torch.empty((len(images), 3, crop_size, crop_size), device=images.device, dtype=images.dtype)
+    
     if r <= 2:
         for sy in range(-r, r+1):
             for sx in range(-r, r+1):
@@ -150,6 +155,16 @@ def batch_crop(images, crop_size, derandomized=False):
             mask = (shifts[:, 1] == s)
             images_out[mask] = images_tmp[mask, :, :, r+s:r+s+crop_size]
     return images_out
+
+def batch_crop_derandomized(images, crop_size, epoch):
+    """
+    Derandomized translation using fixed center crop.
+    HYPOTHESIS: Eliminating random translation overhead speeds up data loading.
+    This is the simplest derandomization - just use center crops every epoch.
+    """
+    r = (images.size(-1) - crop_size)//2
+    # Just return center crop - no random shifts
+    return images[:, :, r:r+crop_size, r:r+crop_size].clone()
 
 class CifarLoader:
     def __init__(self, path, train=True, batch_size=500, aug=None, drop_last=None, shuffle=None, gpu=0):
@@ -185,17 +200,25 @@ class CifarLoader:
             if self.aug.get('flip', False):
                 images = self.proc_images['flip'] = batch_flip_lr(images)
             pad = self.aug.get('translate', 0)
-            if pad > 0:
+            if pad > 0 and not self.aug.get('derandomized_translate', False):
+                # Only pre-pad for random translation
                 self.proc_images['pad'] = F.pad(images, (pad,)*4, 'reflect')
 
+        # Determine which images to use
         if self.aug.get('translate', 0) > 0:
-            derandomized = self.aug.get('derandomized_translate', False)
-            images = batch_crop(self.proc_images['pad'], self.images.shape[-2], derandomized)
+            if self.aug.get('derandomized_translate', False):
+                # Derandomized: use simple center crop (faster)
+                base_images = self.proc_images.get('flip', self.proc_images['norm'])
+                images = batch_crop_derandomized(base_images, self.images.shape[-2], self.epoch)
+            else:
+                # Standard: random crop from padded images
+                images = batch_crop(self.proc_images['pad'], self.images.shape[-2])
         elif self.aug.get('flip', False):
             images = self.proc_images['flip']
         else:
             images = self.proc_images['norm']
         
+        # Apply alternating flip
         if self.aug.get('flip', False):
             if self.epoch % 2 == 1:
                 images = images.flip(-1)
@@ -414,10 +437,34 @@ def main(run, hyp, seed=None):
     model = make_net(hyp)
     current_steps = 0
 
-    norm_biases = [p for k, p in model.named_parameters() if 'norm' in k and p.requires_grad]
-    other_params = [p for k, p in model.named_parameters() if 'norm' not in k and p.requires_grad]
-    param_configs = [dict(params=norm_biases, lr=lr_biases, weight_decay=wd/lr_biases),
-                     dict(params=other_params, lr=lr, weight_decay=wd/lr)]
+    # Setup optimizer with per-layer BN bias if requested
+    if hyp['net']['per_layer_bn_bias']:
+        # Separate BN biases by block
+        norm_biases_block1 = [p for k, p in model.named_parameters() 
+                              if 'norm' in k and '.2.' in k and p.requires_grad]
+        norm_biases_block2 = [p for k, p in model.named_parameters() 
+                              if 'norm' in k and '.3.' in k and p.requires_grad]
+        norm_biases_block3 = [p for k, p in model.named_parameters() 
+                              if 'norm' in k and '.4.' in k and p.requires_grad]
+        other_params = [p for k, p in model.named_parameters() 
+                        if 'norm' not in k and p.requires_grad]
+        
+        scales = hyp['net']['bn_bias_scales']
+        param_configs = [
+            dict(params=norm_biases_block1, lr=lr*scales['block1'], weight_decay=wd/(lr*scales['block1'])),
+            dict(params=norm_biases_block2, lr=lr*scales['block2'], weight_decay=wd/(lr*scales['block2'])),
+            dict(params=norm_biases_block3, lr=lr*scales['block3'], weight_decay=wd/(lr*scales['block3'])),
+            dict(params=other_params, lr=lr, weight_decay=wd/lr)
+        ]
+    else:
+        # Standard: all BN biases get same scale
+        norm_biases = [p for k, p in model.named_parameters() if 'norm' in k and p.requires_grad]
+        other_params = [p for k, p in model.named_parameters() if 'norm' not in k and p.requires_grad]
+        param_configs = [
+            dict(params=norm_biases, lr=lr_biases, weight_decay=wd/lr_biases),
+            dict(params=other_params, lr=lr, weight_decay=wd/lr)
+        ]
+    
     optimizer = torch.optim.SGD(param_configs, momentum=momentum, nesterov=True)
 
     def get_lr(step):
@@ -447,10 +494,11 @@ def main(run, hyp, seed=None):
 
     for epoch in range(ceil(epochs)):
         if hyp['net']['per_layer_bn_bias']:
-            # Enable per-layer control of BN bias training
-            for i, mod in enumerate(model.modules()):
+            # Control all BN biases together
+            requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
+            for mod in model.modules():
                 if isinstance(mod, BatchNorm):
-                    mod.bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
+                    mod.bias.requires_grad = requires_grad
         else:
             model[0].bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
 
@@ -508,6 +556,10 @@ if __name__ == "__main__":
     print(f"  Runs: {args.num_runs}")
     print(f"  Derandomized translate: {args.derandomized_translate}")
     print(f"  Per-layer BN bias: {args.per_layer_bn_bias}")
+    if args.per_layer_bn_bias:
+        print(f"    Block1 scale: {args.bn_bias_scale_block1}")
+        print(f"    Block2 scale: {args.bn_bias_scale_block2}")
+        print(f"    Block3 scale: {args.bn_bias_scale_block3}")
     print("="*80)
 
     print_columns(logging_columns_list, is_head=True)
