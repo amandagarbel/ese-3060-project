@@ -498,14 +498,9 @@ def main(run, hyp, seed=None):
     for epoch in range(ceil(epochs)):
         # Handle whitening bias training
         if hyp['net']['adaptive_whitening_bias']:
-            # Gradually reduce whitening bias LR
+            # H3: Gradually reduce whitening bias LR
             if epoch < hyp['opt']['whiten_bias_epochs']:
                 model[0].bias.requires_grad = True
-                # Scale down the learning rate gradually
-                scale = 1.0 - (epoch / hyp['opt']['whiten_bias_epochs'])
-                for param_group in optimizer.param_groups:
-                    if model[0].bias in param_group['params']:
-                        param_group['lr'] = lr_biases * scale
             else:
                 model[0].bias.requires_grad = False
         else:
