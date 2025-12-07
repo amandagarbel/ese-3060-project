@@ -17,75 +17,64 @@ torch.backends.cudnn.benchmark = True
 #############################################
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='CIFAR-10 Training Speedrun')
+    parser = argparse.ArgumentParser(description='CIFAR-10 Training Speedrun - All Experiments')
     
     # Training hyperparameters
-    parser.add_argument('--train-epochs', type=float, default=9.9,
-                        help='Number of training epochs')
-    parser.add_argument('--batch-size', type=int, default=1024,
-                        help='Batch size for training')
-    parser.add_argument('--lr', type=float, default=11.5,
-                        help='Learning rate per 1024 examples')
-    parser.add_argument('--momentum', type=float, default=0.85,
-                        help='SGD momentum')
-    parser.add_argument('--weight-decay', type=float, default=0.0153,
-                        help='Weight decay per 1024 examples')
-    parser.add_argument('--bias-scaler', type=float, default=64.0,
-                        help='Learning rate scaler for BatchNorm biases')
-    parser.add_argument('--label-smoothing', type=float, default=0.2,
-                        help='Label smoothing factor')
-    parser.add_argument('--whiten-bias-epochs', type=int, default=3,
-                        help='Epochs to train whitening layer bias')
+    parser.add_argument('--train-epochs', type=float, default=9.9)
+    parser.add_argument('--batch-size', type=int, default=1024)
+    parser.add_argument('--lr', type=float, default=11.5)
+    parser.add_argument('--momentum', type=float, default=0.85)
+    parser.add_argument('--weight-decay', type=float, default=0.0153)
+    parser.add_argument('--bias-scaler', type=float, default=64.0)
+    parser.add_argument('--label-smoothing', type=float, default=0.2)
+    parser.add_argument('--whiten-bias-epochs', type=int, default=3)
     
     # Augmentation settings
-    parser.add_argument('--flip', action='store_true', default=True,
-                        help='Use horizontal flip augmentation')
-    parser.add_argument('--no-flip', dest='flip', action='store_false',
-                        help='Disable horizontal flip augmentation')
-    parser.add_argument('--translate', type=int, default=2,
-                        help='Translation augmentation amount (pixels)')
+    parser.add_argument('--flip', action='store_true', default=True)
+    parser.add_argument('--no-flip', dest='flip', action='store_false')
+    parser.add_argument('--translate', type=int, default=2)
+    
+    # EXPERIMENT 1: Derandomized Translation
     parser.add_argument('--derandomized-translate', action='store_true', default=False,
-                        help='Use derandomized translation pattern (FASTER cropping)')
+                        help='Use center crop instead of random (faster data loading)')
+    
+    # EXPERIMENT 2: Per-Layer BN Bias Learning Rates
+    parser.add_argument('--per-layer-bn-bias', action='store_true', default=False,
+                        help='Use different LR scales for each block')
+    parser.add_argument('--bn-bias-scale-block1', type=float, default=64.0)
+    parser.add_argument('--bn-bias-scale-block2', type=float, default=32.0)
+    parser.add_argument('--bn-bias-scale-block3', type=float, default=16.0)
+    
+    # EXPERIMENT 3: Adaptive Whitening Bias Schedule
+    parser.add_argument('--adaptive-whitening-bias', action='store_true', default=False,
+                        help='Gradually reduce whitening bias LR instead of freezing')
+    
+    # EXPERIMENT 4: Per-Block BN Momentum
+    parser.add_argument('--per-block-bn-momentum', action='store_true', default=False,
+                        help='Use different BN momentum per block (faster early, slower late)')
+    parser.add_argument('--bn-momentum-decay', type=float, default=0.85,
+                        help='Decay factor for BN momentum per block')
+    
+    # EXPERIMENT 5: Lightweight Skip Connections
+    parser.add_argument('--lightweight-skip', action='store_true', default=False,
+                        help='Add lightweight skip connections (scaled by 0.5)')
     
     # Network architecture
-    parser.add_argument('--block1-width', type=int, default=64,
-                        help='Width of first conv block')
-    parser.add_argument('--block2-width', type=int, default=256,
-                        help='Width of second conv block')
-    parser.add_argument('--block3-width', type=int, default=256,
-                        help='Width of third conv block')
-    parser.add_argument('--bn-momentum', type=float, default=0.6,
-                        help='BatchNorm momentum')
-    parser.add_argument('--scaling-factor', type=float, default=1/9,
-                        help='Output scaling factor')
-    parser.add_argument('--tta-level', type=int, default=2,
-                        help='Test-time augmentation level (0-2)')
-    parser.add_argument('--per-layer-bn-bias', action='store_true', default=False,
-                        help='Enable per-layer BN bias learning rates')
-    parser.add_argument('--bn-bias-scale-block1', type=float, default=64.0,
-                        help='BN bias LR scale for block 1')
-    parser.add_argument('--bn-bias-scale-block2', type=float, default=32.0,
-                        help='BN bias LR scale for block 2')
-    parser.add_argument('--bn-bias-scale-block3', type=float, default=16.0,
-                        help='BN bias LR scale for block 3')
+    parser.add_argument('--block1-width', type=int, default=64)
+    parser.add_argument('--block2-width', type=int, default=256)
+    parser.add_argument('--block3-width', type=int, default=256)
+    parser.add_argument('--bn-momentum', type=float, default=0.6)
+    parser.add_argument('--scaling-factor', type=float, default=1/9)
+    parser.add_argument('--tta-level', type=int, default=2)
     
     # Experiment settings
-    parser.add_argument('--num-runs', type=int, default=25,
-                        help='Number of runs for statistical analysis')
-    parser.add_argument('--seed', type=int, default=None,
-                        help='Random seed (if None, uses random seeds)')
-    parser.add_argument('--log-dir', type=str, default='logs',
-                        help='Directory to save logs')
-    parser.add_argument('--experiment-name', type=str, default=None,
-                        help='Name for this experiment')
-    parser.add_argument('--no-warmup', action='store_true', default=False,
-                        help='Skip warmup run')
+    parser.add_argument('--num-runs', type=int, default=25)
+    parser.add_argument('--seed', type=int, default=None)
+    parser.add_argument('--log-dir', type=str, default='logs')
+    parser.add_argument('--experiment-name', type=str, default=None)
+    parser.add_argument('--no-warmup', action='store_true', default=False)
     
     return parser.parse_args()
-
-#############################################
-#            Setup/Hyperparameters          #
-#############################################
 
 def setup_hyperparameters(args):
     """Convert argparse arguments to hyperparameter dictionary"""
@@ -119,7 +108,11 @@ def setup_hyperparameters(args):
                 'block1': args.bn_bias_scale_block1,
                 'block2': args.bn_bias_scale_block2,
                 'block3': args.bn_bias_scale_block3,
-            }
+            },
+            'adaptive_whitening_bias': args.adaptive_whitening_bias,
+            'per_block_bn_momentum': args.per_block_bn_momentum,
+            'bn_momentum_decay': args.bn_momentum_decay,
+            'lightweight_skip': args.lightweight_skip,
         },
     }
     return hyp
@@ -136,7 +129,7 @@ def batch_flip_lr(inputs):
     return torch.where(flip_mask, inputs.flip(-1), inputs)
 
 def batch_crop(images, crop_size):
-    """Standard random crop - used by original paper"""
+    """Standard random crop"""
     r = (images.size(-1) - crop_size)//2
     shifts = torch.randint(-r, r+1, size=(len(images), 2), device=images.device)
     images_out = torch.empty((len(images), 3, crop_size, crop_size), device=images.device, dtype=images.dtype)
@@ -156,14 +149,9 @@ def batch_crop(images, crop_size):
             images_out[mask] = images_tmp[mask, :, :, r+s:r+s+crop_size]
     return images_out
 
-def batch_crop_derandomized(images, crop_size, epoch):
-    """
-    Derandomized translation using fixed center crop.
-    HYPOTHESIS: Eliminating random translation overhead speeds up data loading.
-    This is the simplest derandomization - just use center crops every epoch.
-    """
+def batch_crop_derandomized(images, crop_size):
+    """Center crop - eliminates random translation overhead"""
     r = (images.size(-1) - crop_size)//2
-    # Just return center crop - no random shifts
     return images[:, :, r:r+crop_size, r:r+crop_size].clone()
 
 class CifarLoader:
@@ -201,24 +189,19 @@ class CifarLoader:
                 images = self.proc_images['flip'] = batch_flip_lr(images)
             pad = self.aug.get('translate', 0)
             if pad > 0 and not self.aug.get('derandomized_translate', False):
-                # Only pre-pad for random translation
                 self.proc_images['pad'] = F.pad(images, (pad,)*4, 'reflect')
 
-        # Determine which images to use
         if self.aug.get('translate', 0) > 0:
             if self.aug.get('derandomized_translate', False):
-                # Derandomized: use simple center crop (faster)
                 base_images = self.proc_images.get('flip', self.proc_images['norm'])
-                images = batch_crop_derandomized(base_images, self.images.shape[-2], self.epoch)
+                images = batch_crop_derandomized(base_images, self.images.shape[-2])
             else:
-                # Standard: random crop from padded images
                 images = batch_crop(self.proc_images['pad'], self.images.shape[-2])
         elif self.aug.get('flip', False):
             images = self.proc_images['flip']
         else:
             images = self.proc_images['norm']
         
-        # Apply alternating flip
         if self.aug.get('flip', False):
             if self.epoch % 2 == 1:
                 images = images.flip(-1)
@@ -263,8 +246,10 @@ class Conv(nn.Conv2d):
         torch.nn.init.dirac_(w[:w.size(1)])
 
 class ConvGroup(nn.Module):
-    def __init__(self, channels_in, channels_out, batchnorm_momentum):
+    def __init__(self, channels_in, channels_out, batchnorm_momentum, use_skip=False):
         super().__init__()
+        self.use_skip = use_skip and (channels_in == channels_out)
+        
         self.conv1 = Conv(channels_in, channels_out)
         self.pool = nn.MaxPool2d(2)
         self.norm1 = BatchNorm(channels_out, batchnorm_momentum)
@@ -273,12 +258,21 @@ class ConvGroup(nn.Module):
         self.activ = nn.GELU()
 
     def forward(self, x):
+        identity = x if self.use_skip else None
+        
         x = self.conv1(x)
         x = self.pool(x)
         x = self.norm1(x)
         x = self.activ(x)
+        
         x = self.conv2(x)
         x = self.norm2(x)
+        
+        # Lightweight skip connection (scaled down)
+        if identity is not None:
+            identity_pooled = F.max_pool2d(identity, 2)
+            x = x + 0.5 * identity_pooled
+        
         x = self.activ(x)
         return x
 
@@ -288,15 +282,26 @@ class ConvGroup(nn.Module):
 
 def make_net(hyp):
     widths = hyp['net']['widths']
-    batchnorm_momentum = hyp['net']['batchnorm_momentum']
+    base_momentum = hyp['net']['batchnorm_momentum']
+    
+    # Calculate per-block BN momentum if enabled
+    if hyp['net']['per_block_bn_momentum']:
+        decay = hyp['net']['bn_momentum_decay']
+        bn_momentums = [base_momentum * (decay ** i) for i in range(3)]
+    else:
+        bn_momentums = [base_momentum] * 3
+    
+    use_skip = hyp['net']['lightweight_skip']
+    
     whiten_kernel_size = 2
     whiten_width = 2 * 3 * whiten_kernel_size**2
+    
     net = nn.Sequential(
         Conv(3, whiten_width, whiten_kernel_size, padding=0, bias=True),
         nn.GELU(),
-        ConvGroup(whiten_width, widths['block1'], batchnorm_momentum),
-        ConvGroup(widths['block1'], widths['block2'], batchnorm_momentum),
-        ConvGroup(widths['block2'], widths['block3'], batchnorm_momentum),
+        ConvGroup(whiten_width, widths['block1'], bn_momentums[0], use_skip=False),  # Can't skip - different sizes
+        ConvGroup(widths['block1'], widths['block2'], bn_momentums[1], use_skip=use_skip),
+        ConvGroup(widths['block2'], widths['block3'], bn_momentums[2], use_skip=use_skip),
         nn.MaxPool2d(3),
         Flatten(),
         nn.Linear(widths['block3'], 10, bias=False),
@@ -439,7 +444,6 @@ def main(run, hyp, seed=None):
 
     # Setup optimizer with per-layer BN bias if requested
     if hyp['net']['per_layer_bn_bias']:
-        # Separate BN biases by block
         norm_biases_block1 = [p for k, p in model.named_parameters() 
                               if 'norm' in k and '.2.' in k and p.requires_grad]
         norm_biases_block2 = [p for k, p in model.named_parameters() 
@@ -457,7 +461,6 @@ def main(run, hyp, seed=None):
             dict(params=other_params, lr=lr, weight_decay=wd/lr)
         ]
     else:
-        # Standard: all BN biases get same scale
         norm_biases = [p for k, p in model.named_parameters() if 'norm' in k and p.requires_grad]
         other_params = [p for k, p in model.named_parameters() if 'norm' not in k and p.requires_grad]
         param_configs = [
@@ -493,14 +496,27 @@ def main(run, hyp, seed=None):
     total_time_seconds += 1e-3 * starter.elapsed_time(ender)
 
     for epoch in range(ceil(epochs)):
-        if hyp['net']['per_layer_bn_bias']:
-            # Control all BN biases together
-            requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
-            for mod in model.modules():
-                if isinstance(mod, BatchNorm):
-                    mod.bias.requires_grad = requires_grad
+        # Handle whitening bias training
+        if hyp['net']['adaptive_whitening_bias']:
+            # Gradually reduce whitening bias LR
+            if epoch < hyp['opt']['whiten_bias_epochs']:
+                model[0].bias.requires_grad = True
+                # Scale down the learning rate gradually
+                scale = 1.0 - (epoch / hyp['opt']['whiten_bias_epochs'])
+                for param_group in optimizer.param_groups:
+                    if model[0].bias in param_group['params']:
+                        param_group['lr'] = lr_biases * scale
+            else:
+                model[0].bias.requires_grad = False
         else:
-            model[0].bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
+            # Standard: freeze after whiten_bias_epochs
+            if hyp['net']['per_layer_bn_bias']:
+                requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
+                for mod in model.modules():
+                    if isinstance(mod, BatchNorm):
+                        mod.bias.requires_grad = requires_grad
+            else:
+                model[0].bias.requires_grad = (epoch < hyp['opt']['whiten_bias_epochs'])
 
         starter.record()
         model.train()
@@ -551,15 +567,20 @@ if __name__ == "__main__":
         code = f.read()
 
     print("="*80)
-    print("Experiment Configuration:")
-    print(f"  Name: {args.experiment_name or 'unnamed'}")
-    print(f"  Runs: {args.num_runs}")
-    print(f"  Derandomized translate: {args.derandomized_translate}")
-    print(f"  Per-layer BN bias: {args.per_layer_bn_bias}")
+    print("EXPERIMENT CONFIGURATION")
+    print("="*80)
+    print(f"Name: {args.experiment_name or 'unnamed'}")
+    print(f"Runs: {args.num_runs}")
+    print(f"\nActive Experiments:")
+    print(f"  [1] Derandomized Translate: {args.derandomized_translate}")
+    print(f"  [2] Per-Layer BN Bias: {args.per_layer_bn_bias}")
     if args.per_layer_bn_bias:
-        print(f"    Block1 scale: {args.bn_bias_scale_block1}")
-        print(f"    Block2 scale: {args.bn_bias_scale_block2}")
-        print(f"    Block3 scale: {args.bn_bias_scale_block3}")
+        print(f"      Scales: [{args.bn_bias_scale_block1}, {args.bn_bias_scale_block2}, {args.bn_bias_scale_block3}]")
+    print(f"  [3] Adaptive Whitening Bias: {args.adaptive_whitening_bias}")
+    print(f"  [4] Per-Block BN Momentum: {args.per_block_bn_momentum}")
+    if args.per_block_bn_momentum:
+        print(f"      Decay: {args.bn_momentum_decay}")
+    print(f"  [5] Lightweight Skip Connections: {args.lightweight_skip}")
     print("="*80)
 
     print_columns(logging_columns_list, is_head=True)
