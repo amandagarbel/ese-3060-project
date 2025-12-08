@@ -403,6 +403,9 @@ if master_process:
     logdir = 'logs/%s/' % run_id
     os.makedirs(logdir, exist_ok=True)
     logfile = 'logs/%s.txt' % run_id
+    metrics_file = os.path.join(logdir, "loss_history.npz")
+    train_loss_steps, train_loss_history = [], []
+    val_loss_steps, val_loss_history = [], []
     # create the log file
     with open(logfile, "w") as f:
         # begin the log by printing this file (the Python code)
@@ -452,6 +455,8 @@ for step in range(args.num_iterations + 1):
         val_loss /= val_steps
         # log val loss to console and to logfile
         if master_process:
+            val_loss_steps.append(step)
+            val_loss_history.append(val_loss.item())
             print(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms')
             with open(logfile, "a") as f:
                 f.write(f'step:{step}/{args.num_iterations} val_loss:{val_loss:.4f} train_time:{training_time_ms:.0f}ms step_avg:{training_time_ms/(timed_steps-1):.2f}ms\n')
@@ -506,9 +511,16 @@ for step in range(args.num_iterations + 1):
     #dist.all_reduce(train_loss, op=dist.ReduceOp.AVG) # all-reducing the training loss would be more correct in terms of logging, but slower
     if master_process:
         approx_time = training_time_ms + 1000 * (time.time() - t0)
+        train_loss_steps.append(step + 1)
+        train_loss_history.append(train_loss.item())
         print(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms")
         with open(logfile, "a") as f:
             f.write(f"step:{step+1}/{args.num_iterations} train_loss:{train_loss.item():.4f} train_time:{approx_time:.0f}ms step_avg:{approx_time/timed_steps:.2f}ms\n")
 
 if master_process:
+    np.savez(metrics_file,
+             train_steps=np.array(train_loss_steps),
+             train_losses=np.array(train_loss_history),
+             val_steps=np.array(val_loss_steps),
+             val_losses=np.array(val_loss_history))
     print(f"peak memory consumption: {torch.cuda.max_memory_allocated() // 1024 // 1024} MiB")
