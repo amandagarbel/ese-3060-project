@@ -352,8 +352,8 @@ class Hyperparameters:
     use_multilevel : bool = True
     level2_start : int = 1700
     level3_start : int = 3400
-    level1_layers : int = 6    # active layers in phase 1
-    level2_layers : int = 9    # active layers in phase 2
+    level1_layers : int = 8    # active layers in phase 1
+    level2_layers : int = 10    # active layers in phase 2
     level3_layers : int = 12   # active layers in phase 3 (full model)
 args = Hyperparameters()
 
