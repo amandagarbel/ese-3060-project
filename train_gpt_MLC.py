@@ -537,7 +537,10 @@ for step in range(args.num_iterations + 1):
         else:
             loss.backward() # just sync on the last step
     for p in model.parameters():
-        p.grad /= train_accumulation_steps
+        if p.grad is not None:
+            p.grad.detach().div_(train_accumulation_steps)
+            # or equivalently: p.grad /= train_accumulation_steps
+
     # step the optimizers and schedulers
     for opt, sched in zip(optimizers, schedulers):
         opt.step()
